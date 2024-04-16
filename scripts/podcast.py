@@ -110,11 +110,47 @@ def get_episode(pid, timestamp):
     return results
 
 
+@retry(stop_max_attempt_number=3, wait_fixed=5000)
+def get_history():
+    results = []
+    url = "https://api.xiaoyuzhoufm.com/v1/episode-played/list-history"
+    data = {
+        "limit": 25,
+    }
+    loadMoreKey = ""
+    while loadMoreKey is not None:
+        if loadMoreKey:
+            data["loadMoreKey"] = loadMoreKey
+        resp = requests.post(url, json=data, headers=headers)
+        if resp.ok:
+            loadMoreKey = resp.json().get("loadMoreKey")
+            d = resp.json().get("data")
+            for item in d:
+                episode = item.get("episode")
+                pubDate = pendulum.parse(episode.get("pubDate")).in_tz("UTC").int_timestamp
+                episode["pubDate"] = pubDate
+                results.append(episode)
+        else:
+            refresh_token()
+            raise Exception(f"Error {data} {resp.text}")
+    return results
+
+
 def check_podcast(pid):
     """检查是否已经插入过"""
     filter = {"property": "Pid", "rich_text": {"equals": pid}}
     response = notion_helper.query(
         database_id=notion_helper.podcast_database_id, filter=filter
+    )
+    if len(response["results"]) > 0:
+        return response["results"][0].get("id")
+
+
+def check_eposide(eid):
+    """检查是否已经插入过"""
+    filter = {"property": "Eid", "rich_text": {"equals": eid}}
+    response = notion_helper.query(
+        database_id=notion_helper.episode_database_id, filter=filter
     )
     if len(response["results"]) > 0:
         return response["results"][0].get("id")
@@ -140,6 +176,17 @@ def get_timestamp(id):
     return 0
 
 
+def delete():
+    """删除未听的"""
+    filter = {"property": "状态", "status": {"equals": "未听"}}
+    results = notion_helper.query_all(
+        database_id=notion_helper.episode_database_id, filter=filter
+    )
+    for index,result in enumerate(results):
+        print(f"正在删除第{index+1}个，共{len(results)}个")
+        notion_helper.delete_block(block_id=result.get("id"))
+
+
 def merge_podcast(list1, list2):
     results = []
     results.extend(list1)
@@ -151,11 +198,11 @@ def merge_podcast(list1, list2):
 
 
 def insert_podcast():
-    refresh_token()
     list1 = get_mileage()
     list2 = get_podcast()
     results = merge_podcast(list1, list2)
-    for index,result in enumerate(results):
+    dict = {}
+    for index, result in enumerate(results):
         podcast = {}
         podcast["播客"] = result.get("title")
         podcast["Brief"] = result.get("brief")
@@ -191,31 +238,36 @@ def insert_podcast():
         print(
             f"正在同步 = {result.get('title')}，共{len(results)}个播客，当前是第{index+1}个"
         )
+        
         page_id = check_podcast(pid)
-        if not page_id:
+        if page_id:
+            notion_helper.update_page(page_id=page_id, properties=properties)
+        else:
             page_id = notion_helper.create_page(
                 parent=parent, properties=properties, icon=get_icon(cover)
             ).get("id")
-        else:
-            notion_helper.update_page(page_id=page_id, properties=properties)
-        insert_episode(pid, page_id, cover)
+        dict[pid] =(page_id, cover)
+    return dict
 
 
-def insert_episode(pid, page_id, cover):
-    timestamp = get_timestamp(page_id)
-    results = get_episode(pid, timestamp)
-    results.sort(key=lambda x: x["pubDate"])
-    for index, result in enumerate(results):
+def insert_episode(episodes, d):
+    episodes.sort(key=lambda x: x["pubDate"])
+    for index, result in enumerate(episodes):
+        pid = result.get("pid")
+        if pid not in d:
+            continue
         episode = {}
         episode["标题"] = result.get("title")
         episode["Description"] = result.get("description")
         episode["时间戳"] = result.get("pubDate")
         episode["发布时间"] = result.get("pubDate")
         episode["音频"] = result.get("media").get("source").get("url")
-        episode["Eid"] = result.get("eid")
+        eid = result.get("eid")
+        episode["Eid"] = eid
+ 
         episode["时长"] = result.get("duration")
         episode["喜欢"] = result.get("isPicked")
-        episode["Podcast"] = [page_id]
+        episode["Podcast"] = [d.get(pid)[0]]
         episode["链接"] = f"hhttps://www.xiaoyuzhoufm.com/episode/{result.get('eid')}"
         status = "未听"
         if result.get("isFinished"):
@@ -225,17 +277,25 @@ def insert_episode(pid, page_id, cover):
         episode["状态"] = status
         properties = utils.get_properties(episode, book_properties_type_dict)
         print(
-            f"正在同步 = {result.get('title')}，共{len(results)}个Episode，当前是第{index+1}个"
+            f"正在同步 = {result.get('title')}，共{len(episodes)}个Episode，当前是第{index+1}个"
         )
         parent = {
             "database_id": notion_helper.episode_database_id,
             "type": "database_id",
         }
-        notion_helper.create_page(
-            parent=parent, properties=properties, icon=get_icon(cover)
-        )
+        page_id = check_eposide(eid)
+        if page_id:
+            notion_helper.update_page(page_id=page_id, properties=properties)
+        else:
+            notion_helper.create_page(
+                parent=parent, properties=properties, icon=get_icon(d.get(pid)[1])
+            )
 
 
 if __name__ == "__main__":
     notion_helper = NotionHelper()
-    insert_podcast()
+    refresh_token()
+    d = insert_podcast()
+    episodes = get_history()
+    insert_episode(episodes, d)
+    delete()
