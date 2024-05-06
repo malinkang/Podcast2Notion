@@ -211,11 +211,12 @@ def insert_podcast():
         podcast["收听时长"] = result.get("playedSeconds", 0)
         podcast["Description"] = result.get("description")
         podcast["链接"] = f"https://www.xiaoyuzhoufm.com/podcast/{result.get('pid')}"
-        podcast["最后更新时间"] = (
-            pendulum.parse(result.get("latestEpisodePubDate"))
-            .in_tz("UTC")
-            .int_timestamp
-        )
+        if result.get("latestEpisodePubDate"):
+            podcast["最后更新时间"] = (
+                pendulum.parse(result.get("latestEpisodePubDate"))
+                .in_tz("UTC")
+                .int_timestamp
+            )
         cover = result.get("image").get("picUrl")
         podcast["全部"] = [
             notion_helper.get_relation_id(
